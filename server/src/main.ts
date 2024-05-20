@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import fastify from "fastify";
 import fastifyCors from "@fastify/cors";
@@ -14,6 +15,15 @@ const REDIS_ENDPOINT = process.env.REDIS_ENDPOINT;
 
 const CONNECTION_COUNT_KEY = "chat:connection-count";
 const CONNECTION_COUNT_UPDATED_CHANNEL = "chat:connection-count-updated";
+const NEW_MESSAGE_CHANNEL = "chat:new-message";
+// To persist messages
+// const MESSAGES_KEY = 'chat:messages';
+// function sendMessageToRoom({
+//   room, messageContents
+// }){
+//   const channel = `chat:${room}:messages`
+
+// }
 
 if (!REDIS_ENDPOINT) {
   console.error("Missing REDIS_ENDPOINT");
@@ -40,7 +50,6 @@ async function buildServer() {
   });
 
   await app.register(fastifyIO);
-
   // const currentCount = await publisher.get(CONNECTION_COUNT_KEY);
   // if (!currentCount) {
   //   await publisher.set(CONNECTION_COUNT_KEY, 0);
@@ -50,17 +59,26 @@ async function buildServer() {
   /* ------------------------------ User Connects ----------------------------- */
   app.io.on("connection", async (io) => {
     console.log("Client connected");
-
+    // Increment count
     const incrResult = await publisher.incr(CONNECTION_COUNT_KEY);
     connectedClients++;
     await publisher.publish(
       CONNECTION_COUNT_UPDATED_CHANNEL,
       String(incrResult)
     );
+    // Reusing channel between sockets and publishers (I'm lazy)
+    io.on(NEW_MESSAGE_CHANNEL, async (payload) => {
+      const message = payload.message;
+      if (!message) {
+        return;
+      }
+      // Publish to Redis channel
+      // Message is going to be a buffer that needs to be converted to string.
+      await publisher.publish(NEW_MESSAGE_CHANNEL, message.toString());
+    });
 
+    // Decrement Count
     io.on("disconnect", async () => {
-      console.log("Client disconnected");
-
       connectedClients--;
       const decrResult = await publisher.decr(CONNECTION_COUNT_KEY);
       await publisher.publish(
@@ -79,7 +97,17 @@ async function buildServer() {
       return;
     }
     console.log(
-      `${count} clients connected to ${CONNECTION_COUNT_UPDATED_CHANNEL} channel`
+      `${count} clients subscribed to ${CONNECTION_COUNT_UPDATED_CHANNEL} channel`
+    );
+  });
+
+  subscriber.subscribe(NEW_MESSAGE_CHANNEL, (err, count) => {
+    if (err) {
+      console.error(`Error subscribing to ${NEW_MESSAGE_CHANNEL}`);
+      return;
+    }
+    console.log(
+      `${count} clients subscribed to ${NEW_MESSAGE_CHANNEL} channel:`
     );
   });
 
@@ -90,9 +118,20 @@ async function buildServer() {
       app.io.emit(CONNECTION_COUNT_UPDATED_CHANNEL, {
         count: text,
       });
+    }
 
+    // If you want all the messages to have a diff id..
+    if (channel === NEW_MESSAGE_CHANNEL) {
+      app.io.emit(NEW_MESSAGE_CHANNEL, {
+        message: text,
+        id: randomUUID(), // Helpful for mapping over messages in React.
+        createdAt: new Date(),
+        port: PORT,
+      });
       return;
     }
+
+    return;
   });
 
   // Health check endpoint.
